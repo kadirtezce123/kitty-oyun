@@ -1,3 +1,7 @@
+// 1. Sunucu Bağlantısı (Socket.io)
+const socket = io();
+
+// 2. Sahne ve Kamera Kurulumu
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xffe6f0);
 scene.fog = new THREE.FogExp2(0xffe6f0, 0.025);
@@ -69,28 +73,74 @@ for (let i = 0; i < 10; i++) {
   hearts.push(h);
 }
 
-// Karakter
-const player = new THREE.Group();
-const body = new THREE.Mesh(
-  new THREE.BoxGeometry(1.2, 1.2, 1.2),
-  new THREE.MeshStandardMaterial({ color: 0xff69b4 })
-);
-player.add(body);
+// 3. Karakter Üretici Fonksiyon
+function createCharacter(colorHex) {
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(1.2, 1.2, 1.2),
+    new THREE.MeshStandardMaterial({ color: colorHex })
+  );
+  group.add(body);
 
-const earGeo = new THREE.ConeGeometry(0.3, 0.5, 4);
-const earMat = new THREE.MeshStandardMaterial({ color: 0xff1493 });
-const leftEar = new THREE.Mesh(earGeo, earMat);
-leftEar.position.set(-0.4, 0.8, 0);
-player.add(leftEar);
+  const earGeo = new THREE.ConeGeometry(0.3, 0.5, 4);
+  const earMat = new THREE.MeshStandardMaterial({ color: 0xff1493 });
+  
+  const earL = new THREE.Mesh(earGeo, earMat);
+  earL.position.set(-0.4, 0.8, 0);
+  group.add(earL);
 
-const rightEar = new THREE.Mesh(earGeo, earMat);
-rightEar.position.set(0.4, 0.8, 0);
-player.add(rightEar);
+  const earR = new THREE.Mesh(earGeo, earMat);
+  earR.position.set(0.4, 0.8, 0);
+  group.add(earR);
 
+  return group;
+}
+
+// Kendi Karakterimiz (Varsayılan Pembe)
+const player = createCharacter(0xff69b4);
 player.position.set(0, 0.6, 0);
 scene.add(player);
 
-// Kontroller
+// Diğer Oyuncuların Depolandığı Liste
+const otherPlayers = {};
+
+// 4. Socket.io Multiplayer Olayları
+socket.on('currentPlayers', (players) => {
+  Object.keys(players).forEach((id) => {
+    if (id !== socket.id && !otherPlayers[id]) {
+      const otherChar = createCharacter(players[id].color || 0x87ceeb);
+      otherChar.position.set(players[id].x, players[id].y, players[id].z);
+      otherChar.rotation.y = players[id].ry || 0;
+      scene.add(otherChar);
+      otherPlayers[id] = otherChar;
+    }
+  });
+});
+
+socket.on('newPlayer', (data) => {
+  if (!otherPlayers[data.id]) {
+    const otherChar = createCharacter(data.player.color || 0x87ceeb);
+    otherChar.position.set(data.player.x, data.player.y, data.player.z);
+    scene.add(otherChar);
+    otherPlayers[data.id] = otherChar;
+  }
+});
+
+socket.on('playerMoved', (data) => {
+  if (otherPlayers[data.id]) {
+    otherPlayers[data.id].position.set(data.player.x, data.player.y, data.player.z);
+    otherPlayers[data.id].rotation.y = data.player.ry;
+  }
+});
+
+socket.on('playerDisconnected', (id) => {
+  if (otherPlayers[id]) {
+    scene.remove(otherPlayers[id]);
+    delete otherPlayers[id];
+  }
+});
+
+// 5. Kontroller ve Hareket
 let moveX = 0, moveZ = 0, velY = 0, onGround = true, score = 0;
 const speed = 0.14, gravity = -0.012, jumpForce = 0.28;
 
@@ -147,16 +197,20 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// Oyun Döngüsü
+// 6. Oyun Döngüsü
 let time = 0;
+let lastSend = 0;
+
 function animate() {
   requestAnimationFrame(animate);
   time += 0.03;
 
+  let moved = false;
   if (moveX !== 0 || moveZ !== 0) {
     player.position.x += moveX * speed;
     player.position.z += moveZ * speed;
     player.rotation.y = Math.atan2(moveX, moveZ);
+    moved = true;
   }
 
   if (!onGround) {
@@ -167,8 +221,22 @@ function animate() {
       velY = 0;
       onGround = true;
     }
+    moved = true;
   }
 
+  // Konumu diğer oyuncuya bildirme (saniyede ~20 kez)
+  const now = Date.now();
+  if (moved && now - lastSend > 50) {
+    socket.emit('playerMovement', {
+      x: player.position.x,
+      y: player.position.y,
+      z: player.position.z,
+      ry: player.rotation.y
+    });
+    lastSend = now;
+  }
+
+  // Kalp toplama
   for (let i = hearts.length - 1; i >= 0; i--) {
     const h = hearts[i];
     h.rotation.y += 0.03;
@@ -181,6 +249,7 @@ function animate() {
     }
   }
 
+  // Kamera Takibi
   camera.position.x = player.position.x;
   camera.position.y = player.position.y + 4.5;
   camera.position.z = player.position.z + 7.5;
